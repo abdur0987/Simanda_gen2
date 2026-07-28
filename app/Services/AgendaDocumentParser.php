@@ -13,15 +13,18 @@ class AgendaDocumentParser
 {
     public function parse(UploadedFile $file): array
     {
-        $text = $this->extractPdfText($file->getRealPath());
+        $path = $file->getRealPath();
+        $text = $file->getMimeType() === 'application/pdf'
+            ? $this->extractPdfText($path)
+            : $this->extractImageTextWithOcr($path);
 
-        if (!$this->hasReadableText($text)) {
-            $text = $this->extractPdfTextWithOcr($file->getRealPath());
+        if ($file->getMimeType() === 'application/pdf' && !$this->hasReadableText($text)) {
+            $text = $this->extractPdfTextWithOcr($path);
         }
 
         if (!$this->hasReadableText($text)) {
             throw new RuntimeException(
-                'Teks dokumen tidak terbaca. Untuk PDF hasil scan, install Poppler dan Tesseract OCR di server.'
+                'Teks dokumen tidak terbaca. Pastikan foto jelas, tidak miring, dan Poppler/Tesseract OCR tersedia di server.'
             );
         }
 
@@ -46,16 +49,12 @@ class AgendaDocumentParser
 
         [$agenda['jam_mulai'], $agenda['jam_selesai']] = $this->parsePukul($text);
 
-        $missing = collect([
+        $agenda['_missing_fields'] = collect([
             'nama_agenda' => 'nama agenda/perihal',
             'tanggal_agenda' => 'tanggal',
             'jam_mulai' => 'jam mulai',
             'tempat_agenda' => 'tempat',
-        ])->filter(fn ($label, $field) => empty($agenda[$field]))->values();
-
-        if ($missing->isNotEmpty()) {
-            throw new RuntimeException('Dokumen terbaca, tetapi field berikut belum ditemukan: '.$missing->implode(', ').'.');
-        }
+        ])->filter(fn ($label, $field) => empty($agenda[$field]))->values()->all();
 
         return $agenda;
     }
@@ -79,6 +78,25 @@ class AgendaDocumentParser
         $process->run();
 
         return $process->isSuccessful() ? $process->getOutput() : '';
+    }
+
+    private function extractImageTextWithOcr(string $path): string
+    {
+        $tesseract = $this->findBinary('TESSERACT_BINARY', 'tesseract');
+
+        if (!$tesseract) {
+            return '';
+        }
+
+        $results = [];
+        foreach ([3, 6, 11] as $pageSegmentationMode) {
+            $result = trim($this->runTesseract($tesseract, $path, $pageSegmentationMode));
+            if ($result !== '') {
+                $results[] = $result;
+            }
+        }
+
+        return implode("\n\n", array_unique($results));
     }
 
     private function hasReadableText(string $text): bool
@@ -128,10 +146,16 @@ class AgendaDocumentParser
         }
     }
 
-    private function runTesseract(string $binary, string $image): string
+    private function runTesseract(string $binary, string $image, ?int $pageSegmentationMode = null): string
     {
         $language = env('TESSERACT_LANG', 'ind+eng');
-        $process = new Process([$binary, $image, 'stdout', '-l', $language]);
+        $arguments = [$binary, $image, 'stdout', '-l', $language];
+
+        if ($pageSegmentationMode !== null) {
+            array_push($arguments, '--psm', (string) $pageSegmentationMode);
+        }
+
+        $process = new Process($arguments);
         $process->setTimeout(60);
         $process->run();
 
@@ -175,8 +199,25 @@ class AgendaDocumentParser
 
     private function parsePerihal(string $text): ?string
     {
-        if (preg_match('/Perihal\s*:\s*(.+)/iu', $text, $matches)) {
-            return trim($matches[1], " .\t\n\r\0\x0B");
+        if (preg_match('/\b(?:Perihal|Hal)\s*[:;.\-]?\s*([^\n]+)/iu', $text, $matches)) {
+            return $this->cleanAgendaTitle($matches[1]);
+        }
+
+        $keywords = 'permohonan|undangan|narasumber|rapat|audiensi|kunjungan|pelantikan|pembukaan|penutupan|'.
+            'koordinasi|sosialisasi|monitoring|evaluasi|bimbingan|workshop|seminar|upacara|apel';
+        $candidates = collect(preg_split('/\n/', $text) ?: [])
+            ->map(fn ($line) => trim($line))
+            ->filter(fn ($line) => mb_strlen($line) >= 8 && mb_strlen($line) <= 180)
+            ->filter(fn ($line) => preg_match('/\b(?:'.$keywords.')\b/iu', $line))
+            ->sortByDesc(function ($line) {
+                $wordCount = preg_match_all('/\pL{3,}/u', $line);
+                $digitPenalty = preg_match('/\d/', $line) ? 20 : 0;
+
+                return mb_strlen($line) + ($wordCount * 10) - $digitPenalty;
+            });
+
+        if ($candidates->isNotEmpty()) {
+            return $this->cleanAgendaTitle($candidates->first());
         }
 
         return null;
@@ -184,7 +225,11 @@ class AgendaDocumentParser
 
     private function parseTanggal(string $text): ?string
     {
-        if (!preg_match('/Hari\/Tanggal\s*:\s*(?:[A-Za-z]+,\s*)?(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/iu', $text, $matches)) {
+        $labelPattern = '(?:H?ari\s*\/?\s*Tangg(?:al|ai)|Tanggal)';
+        $weekdayPattern = '(?:Senin|Selasa|Rabu|Kamis|Jum.?at|Sabtu|Minggu)';
+
+        if (!preg_match('/(?:'.$labelPattern.'\s*[:;.\-]?\s*)?(?:'.$weekdayPattern.'\s*,?\s*)'.
+            '(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/iu', $text, $matches)) {
             return null;
         }
 
@@ -203,14 +248,32 @@ class AgendaDocumentParser
             'desember' => '12',
         ];
 
-        $month = $months[Str::lower($matches[2])] ?? null;
+        $monthName = Str::lower($matches[2]);
+        $monthName = [
+            'juti' => 'juli',
+            'juii' => 'juli',
+            'ju1i' => 'juli',
+            'jull' => 'juli',
+        ][$monthName] ?? $monthName;
+        $month = $months[$monthName] ?? null;
+
+        if (!$month) {
+            $closestMonth = collect(array_keys($months))
+                ->mapWithKeys(fn ($candidate) => [$candidate => levenshtein($monthName, $candidate)])
+                ->filter(fn ($distance) => $distance <= 2)
+                ->sort()
+                ->keys()
+                ->first();
+            $month = $closestMonth ? $months[$closestMonth] : null;
+        }
 
         return $month ? sprintf('%04d-%02d-%02d', (int) $matches[3], (int) $month, (int) $matches[1]) : null;
     }
 
     private function parsePukul(string $text): array
     {
-        if (!preg_match('/Pukul\s*:\s*(\d{1,2})[\.:](\d{2})\s*(?:WIB|Wib|wib)?(?:\s*[-–]\s*(selesai|\d{1,2}[\.:]\d{2}))?/iu', $text, $matches)) {
+        if (!preg_match('/Pukul\s*[:;.\-]?\s*(\d{1,2})[\.:](\d{2})\s*(?:WIB)?'.
+            '(?:\s*[-–]\s*(selesai|\d{1,2}[\.:]\d{2}))?/iu', $text, $matches)) {
             return [null, null];
         }
 
@@ -227,11 +290,37 @@ class AgendaDocumentParser
 
     private function parseTempat(string $text): ?string
     {
-        if (!preg_match('/Tempat\s*:\s*(.+?)(?=\n\s*(?:Perlu|Demikian|Atas|Hormat|$))/isu', $text, $matches)) {
+        if (!preg_match(
+            '/(?:^|\n)[ \t]*Tempat[ \t]*[:;.\-]?[ \t]+([^\n]+)/iu',
+            $text,
+            $matches,
+            PREG_OFFSET_CAPTURE
+        )) {
             return null;
         }
 
-        return trim(preg_replace('/\s+/', ' ', $matches[1]) ?? $matches[1], " .\t\n\r\0\x0B");
+        $place = trim($matches[1][0]);
+        $matchEnd = $matches[0][1] + strlen($matches[0][0]);
+        $nextLine = trim(strtok(substr($text, $matchEnd), "\n") ?: '');
+
+        if ($nextLine !== '' && preg_match('/^(?:J(?:l|1|I)|11)[.\s]|^(?:Jalan|Lt|Lantai|Gedung|Ruang|Aula|Kantor)\b/iu', $nextLine)) {
+            $nextLine = preg_replace('/^11\./u', 'Jl.', $nextLine) ?? $nextLine;
+            $place .= ' '.$nextLine;
+        }
+
+        $place = preg_replace('/\bPwr\b/iu', 'PWI', $place) ?? $place;
+
+        return trim(preg_replace('/\s+/', ' ', $place) ?? $place, " .\t\n\r\0\x0B");
+    }
+
+    private function cleanAgendaTitle(string $title): string
+    {
+        $title = trim(preg_replace('/\s+/', ' ', $title) ?? $title, " .:\t\n\r\0\x0B");
+        $title = preg_replace('/\b(?:ermohonan|ohonan)\b/iu', 'Permohonan', $title) ?? $title;
+        $title = preg_replace('/\bmenjagi\b/iu', 'Menjadi', $title) ?? $title;
+        $title = preg_replace('/\bukw\b/iu', 'UKW', $title) ?? $title;
+
+        return $title;
     }
 
     private function parseKehadiran(string $text): array

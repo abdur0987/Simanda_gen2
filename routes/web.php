@@ -58,6 +58,7 @@ Route::middleware(['auth'])->group(function () {
     Route::get('/agenda/show-all', [DashboardController::class, 'showAll']);
     Route::post('/agenda/store', [DashboardController::class, 'store']);
     Route::post('/agenda/import-document', [DashboardController::class, 'importDocument']);
+    Route::post('/agenda/import-document/store', [DashboardController::class, 'storeImportedDocument']);
     Route::get('/agenda/export-pdf', [DashboardController::class, 'exportPdf'])->name('agenda.exportPdf');
     Route::get('/agenda/{id}', [DashboardController::class, 'show']);
     Route::put('/agenda/{id}', [DashboardController::class, 'update']);

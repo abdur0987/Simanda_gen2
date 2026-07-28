@@ -283,9 +283,9 @@
         <!-- Modal Upload Dokumen Agenda -->
         <div class="modal fade" id="upload-agenda-document-modal" tabindex="-1"
             aria-labelledby="upload-agenda-document-modal-label" aria-hidden="true">
-            <div class="modal-dialog">
+            <div class="modal-dialog modal-lg">
                 <div class="modal-content">
-                    <form @submit.prevent="uploadAgendaDocument">
+                    <form @submit.prevent="uploadDocument.reviewReady ? saveImportedAgenda() : processAgendaDocument()">
                         <div class="modal-header">
                             <h5 class="modal-title" id="upload-agenda-document-modal-label">Upload Dokumen Agenda</h5>
                             <button type="button" class="close" data-dismiss="modal" aria-label="Close">
@@ -293,23 +293,149 @@
                             </button>
                         </div>
                         <div class="modal-body">
-                            <div class="form-group">
-                                <label>Dokumen PDF</label>
-                                <input type="file" class="form-control" accept="application/pdf"
-                                    @change="selectAgendaDocument">
+                            <div v-if="!uploadDocument.reviewReady">
+                                <div class="mb-3">
+                                    <input id="agenda-document-file-input" type="file" class="d-none"
+                                        accept="application/pdf,image/*" @change="selectAgendaDocument">
+                                    <button type="button" class="btn btn-primary mr-1" @click="openAgendaFilePicker">
+                                        <i class="fas fa-folder-open"></i> Berkas
+                                    </button>
+                                    <button type="button" class="btn btn-info mr-1" @click="startAgendaCamera"
+                                        :disabled="uploadDocument.cameraActive">
+                                        <i class="fas fa-camera"></i> Kamera
+                                    </button>
+                                    <button type="button" class="btn btn-secondary" @click="stopAgendaCamera"
+                                        v-if="uploadDocument.cameraActive">
+                                        <i class="fas fa-times"></i> Tutup Kamera
+                                    </button>
+                                </div>
+
+                                <div v-if="uploadDocument.fileName" class="alert alert-light">
+                                    <i class="fas fa-paperclip"></i> @{{ uploadDocument.fileName }}
+                                </div>
+
+                                <div v-show="uploadDocument.cameraActive" class="mb-3">
+                                    <video ref="agendaCameraVideo" class="w-100 rounded border" autoplay playsinline
+                                        style="max-height: 360px; object-fit: contain; background: #111;"></video>
+                                    <canvas ref="agendaCameraCanvas" class="d-none"></canvas>
+                                    <button type="button" class="btn btn-success mt-2" @click="captureAgendaPhoto">
+                                        <i class="fas fa-camera"></i> Ambil Foto
+                                    </button>
+                                </div>
+
+                                <div v-if="uploadDocument.imagePreview" class="mb-3">
+                                    <img :src="uploadDocument.imagePreview" class="img-fluid rounded border"
+                                        style="max-height: 420px;">
+                                </div>
                             </div>
-                            <div v-if="uploadDocument.preview.nama_agenda" class="alert alert-light">
-                                <div><strong>Agenda:</strong> @{{ uploadDocument.preview.nama_agenda }}</div>
-                                <div><strong>Tanggal:</strong> @{{ uploadDocument.preview.tanggal_agenda }}</div>
-                                <div><strong>Jam:</strong> @{{ uploadDocument.preview.jam_mulai }} - @{{ uploadDocument.preview.jam_selesai || 'Selesai' }}</div>
-                                <div><strong>Tempat:</strong> @{{ uploadDocument.preview.tempat_agenda }}</div>
+
+                            <div v-if="uploadDocument.reviewReady">
+                                <div class="alert alert-warning" v-if="uploadDocument.warnings.length">
+                                    <strong>Perlu diperiksa:</strong>
+                                    OCR belum menemukan @{{ uploadDocument.warnings.join(', ') }}.
+                                    Isi atau koreksi kolom tersebut sebelum menyimpan.
+                                </div>
+                                <div class="row">
+                                    <div class="col-md-12">
+                                        <div class="form-group">
+                                            <label>Nama Agenda</label>
+                                            <input type="text" class="form-control"
+                                                v-model="uploadDocument.review.nama_agenda">
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="form-group">
+                                            <label>Tanggal</label>
+                                            <input type="date" class="form-control"
+                                                v-model="uploadDocument.review.tanggal_agenda">
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="form-group">
+                                            <label>Jam Mulai</label>
+                                            <input type="time" class="form-control"
+                                                v-model="uploadDocument.review.jam_mulai">
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="form-group">
+                                            <label>Jam Selesai</label>
+                                            <input type="time" class="form-control"
+                                                v-model="uploadDocument.review.jam_selesai">
+                                        </div>
+                                    </div>
+                                    <div class="col-md-12">
+                                        <div class="form-group">
+                                            <label>Tempat</label>
+                                            <input type="text" class="form-control"
+                                                v-model="uploadDocument.review.tempat_agenda">
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="form-group">
+                                            <label>Pakaian</label>
+                                            <input type="text" class="form-control" v-model="uploadDocument.review.pakaian">
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="form-group">
+                                            <label>Sifat Agenda</label>
+                                            <select class="form-control" v-model="uploadDocument.review.sifat_agenda">
+                                                <option value="publik">Publik</option>
+                                                <option value="privat">Privat</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <div class="form-group">
+                                            <label>Pelaksanaan</label>
+                                            <select class="form-control" v-model="uploadDocument.review.is_done">
+                                                <option :value="0">Belum</option>
+                                                <option :value="1">Selesai</option>
+                                                <option :value="2">Reschedule</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-12">
+                                        <div class="form-group">
+                                            <label>Kehadiran</label>
+                                            <div v-for="(item, idx) in uploadDocument.review.kehadiran" :key="idx"
+                                                class="input-group mb-2">
+                                                <input type="text" class="form-control"
+                                                    v-model="uploadDocument.review.kehadiran[idx]">
+                                                <div class="input-group-append">
+                                                    <button type="button" class="btn btn-danger"
+                                                        @click="uploadDocument.review.kehadiran.splice(idx,1)"
+                                                        v-if="uploadDocument.review.kehadiran.length > 1">
+                                                        <i class="fas fa-minus"></i>
+                                                    </button>
+                                                    <button type="button" class="btn btn-success"
+                                                        @click="uploadDocument.review.kehadiran.push('')"
+                                                        v-if="idx === uploadDocument.review.kehadiran.length-1">
+                                                        <i class="fas fa-plus"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <div class="modal-footer">
                             <button type="button" class="btn btn-secondary" data-dismiss="modal">Tutup</button>
-                            <button type="submit" class="btn btn-success" :disabled="uploadDocument.loading">
+                            <button type="button" class="btn btn-warning" @click="resetAgendaDocumentImport"
+                                v-if="uploadDocument.imagePreview || uploadDocument.reviewReady">
+                                <i class="fas fa-redo"></i> Ulangi
+                            </button>
+                            <button type="submit" class="btn btn-success" :disabled="uploadDocument.loading"
+                                v-if="!uploadDocument.reviewReady">
                                 <span v-if="uploadDocument.loading" class="spinner-border spinner-border-sm mr-1"></span>
                                 <i v-else class="fas fa-file-upload"></i> Proses Dokumen
+                            </button>
+                            <button type="submit" class="btn btn-primary" :disabled="uploadDocument.loading"
+                                v-if="uploadDocument.reviewReady">
+                                <span v-if="uploadDocument.loading" class="spinner-border spinner-border-sm mr-1"></span>
+                                <i v-else class="fas fa-save"></i> Simpan
                             </button>
                         </div>
                     </form>

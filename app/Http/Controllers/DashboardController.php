@@ -97,42 +97,75 @@ class DashboardController extends Controller
 
     public function importDocument(Request $request, AgendaDocumentParser $parser): JsonResponse
     {
-        if (!$request->user()->hasRole('Super Admin') && !$request->user()->hasRole('Protokol')) {
-            abort(403);
-        }
+        $this->authorizeAgendaDocumentImport($request);
 
         $request->validate([
-            'document' => ['required', 'file', 'mimes:pdf', 'max:10240'],
+            'document' => ['required', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:10240'],
         ]);
 
         try {
             $data = $parser->parse($request->file('document'));
-
-            $agenda = DB::transaction(function () use ($data) {
-                return Agenda::create([
-                    'nama_agenda' => $data['nama_agenda'],
-                    'tanggal_agenda' => $data['tanggal_agenda'],
-                    'jam_mulai' => $data['jam_mulai'],
-                    'jam_selesai' => $data['jam_selesai'],
-                    'tempat_agenda' => $data['tempat_agenda'],
-                    'pakaian' => $data['pakaian'],
-                    'sifat_agenda' => $data['sifat_agenda'],
-                    'kehadiran' => json_encode($data['kehadiran']),
-                    'is_done' => $data['is_done'],
-                ]);
-            });
+            $missingFields = collect($data['_missing_fields'] ?? [])->values()->all();
+            unset($data['_missing_fields']);
 
             return response()->json([
                 'status' => true,
-                'message' => 'Dokumen berhasil diproses menjadi agenda.',
-                'agenda' => $agenda,
+                'message' => $missingFields
+                    ? 'Dokumen berhasil dibaca sebagian. Periksa kolom yang masih kosong.'
+                    : 'Dokumen berhasil dibaca. Silakan review sebelum disimpan.',
                 'parsed' => $data,
+                'warnings' => $missingFields,
             ]);
         } catch (RuntimeException $exception) {
             return response()->json([
                 'status' => false,
                 'message' => $exception->getMessage(),
             ], 422);
+        }
+    }
+
+    public function storeImportedDocument(Request $request): JsonResponse
+    {
+        $this->authorizeAgendaDocumentImport($request);
+
+        $data = $request->validate([
+            'nama_agenda' => ['required', 'string', 'max:255'],
+            'tanggal_agenda' => ['required', 'date'],
+            'jam_mulai' => ['nullable', 'date_format:H:i'],
+            'jam_selesai' => ['nullable', 'date_format:H:i'],
+            'tempat_agenda' => ['required', 'string', 'max:255'],
+            'pakaian' => ['nullable', 'string', 'max:255'],
+            'sifat_agenda' => ['required', 'in:publik,privat'],
+            'is_done' => ['required', 'integer', 'in:0,1,2'],
+            'kehadiran' => ['nullable', 'array'],
+            'kehadiran.*' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $agenda = DB::transaction(function () use ($data) {
+            return Agenda::create([
+                'nama_agenda' => $data['nama_agenda'],
+                'tanggal_agenda' => $data['tanggal_agenda'],
+                'jam_mulai' => $data['jam_mulai'] ?? null,
+                'jam_selesai' => $data['jam_selesai'] ?? null,
+                'tempat_agenda' => $data['tempat_agenda'],
+                'pakaian' => $data['pakaian'] ?? null,
+                'sifat_agenda' => $data['sifat_agenda'],
+                'kehadiran' => json_encode(array_values(array_filter($data['kehadiran'] ?? ['']))),
+                'is_done' => $data['is_done'],
+            ]);
+        });
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Agenda berhasil disimpan.',
+            'agenda' => $agenda,
+        ]);
+    }
+
+    private function authorizeAgendaDocumentImport(Request $request): void
+    {
+        if (!$request->user()->hasRole('Super Admin') && !$request->user()->hasRole('Protokol')) {
+            abort(403);
         }
     }
 

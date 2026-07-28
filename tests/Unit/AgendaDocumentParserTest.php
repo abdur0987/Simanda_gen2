@@ -32,8 +32,43 @@ TEXT;
         ->and($agenda['jam_mulai'])->toBe('09:00')
         ->and($agenda['jam_selesai'])->toBeNull()
         ->and($agenda['tempat_agenda'])->toBe('Balai Wartawan H. Solfian Akhmad/PWI Lampung, Lt III Jl. Ahmad Yani No. 4/7 Bandar Lampung')
+        ->and($agenda['_missing_fields'])->toBe([])
         ->and($agenda['kehadiran'])->toBe([
             'Kepala Kanwil Kemenag Provinsi Lampung',
             'Bapak Dr. H. Zulkarnain, S.Ag., M.Hum',
+        ]);
+});
+
+it('tolerates common OCR mistakes and missing colons in photographed letters', function () {
+    $text = <<<'TEXT'
+Perihal Permohonan Menjagi Narasumber Ukw
+
+ari/ Tanggai Kamis, 9 Juti 2026
+Pukul 09.00 Wib - selesai
+Tempat Balai Wartawan H. Solfian Akhmad/PWI Lampung, Lt III
+11. Ahmad Yani No. 4/7 Bandar Lampung
+TEXT;
+
+    $agenda = app(AgendaDocumentParser::class)->parseText($text);
+
+    expect($agenda['nama_agenda'])->toBe('Permohonan Menjadi Narasumber UKW')
+        ->and($agenda['tanggal_agenda'])->toBe('2026-07-09')
+        ->and($agenda['jam_mulai'])->toBe('09:00')
+        ->and($agenda['tempat_agenda'])->toBe(
+            'Balai Wartawan H. Solfian Akhmad/PWI Lampung, Lt III Jl. Ahmad Yani No. 4/7 Bandar Lampung'
+        )
+        ->and($agenda['_missing_fields'])->toBe([]);
+});
+
+it('returns partial OCR results for manual review instead of rejecting the document', function () {
+    $agenda = app(AgendaDocumentParser::class)->parseText(
+        "Permohonan Menjadi Narasumber UKW\nPukul 09.00 WIB"
+    );
+
+    expect($agenda['nama_agenda'])->toBe('Permohonan Menjadi Narasumber UKW')
+        ->and($agenda['jam_mulai'])->toBe('09:00')
+        ->and($agenda['_missing_fields'])->toBe([
+            'tanggal',
+            'tempat',
         ]);
 });

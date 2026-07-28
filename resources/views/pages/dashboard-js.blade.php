@@ -27,11 +27,19 @@
             const listJabatan = ref([])
             const filterTanggal = ref('');
             const filterJabatanIds = ref([]);
+            const agendaCameraVideo = ref(null);
+            const agendaCameraCanvas = ref(null);
 
             const uploadDocument = reactive({
                 file: null,
+                fileName: '',
+                imagePreview: '',
                 loading: false,
-                preview: {},
+                cameraActive: false,
+                cameraStream: null,
+                reviewReady: false,
+                warnings: [],
+                review: emptyImportedAgendaReview(),
             })
 
             const postAgenda = reactive({
@@ -138,13 +146,101 @@
             }
 
             function selectAgendaDocument(event) {
-                uploadDocument.file = event.target.files[0] || null;
-                uploadDocument.preview = {};
+                const file = event.target.files[0] || null;
+                resetAgendaDocumentImport();
+
+                if (!file) {
+                    return;
+                }
+
+                uploadDocument.file = file;
+                uploadDocument.fileName = file.name;
+
+                if (file.type.startsWith('image/')) {
+                    uploadDocument.imagePreview = URL.createObjectURL(file);
+                }
             }
 
-            function uploadAgendaDocument() {
+            function openAgendaFilePicker() {
+                document.getElementById('agenda-document-file-input')?.click();
+            }
+
+            async function startAgendaCamera() {
+                resetAgendaDocumentImport(false);
+
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    swalError('Kamera tidak tersedia di browser ini.');
+                    return;
+                }
+
+                try {
+                    uploadDocument.cameraStream = await navigator.mediaDevices.getUserMedia({
+                        video: {
+                            facingMode: { ideal: 'environment' },
+                            width: { ideal: 2560 },
+                            height: { ideal: 1440 },
+                        },
+                        audio: false,
+                    });
+                    uploadDocument.cameraActive = true;
+                    await nextTick();
+
+                    if (agendaCameraVideo.value) {
+                        agendaCameraVideo.value.srcObject = uploadDocument.cameraStream;
+                    }
+                } catch (error) {
+                    swalError('Kamera gagal dibuka.');
+                    console.error(error);
+                }
+            }
+
+            function stopAgendaCamera() {
+                if (uploadDocument.cameraStream) {
+                    uploadDocument.cameraStream.getTracks().forEach(track => track.stop());
+                }
+
+                uploadDocument.cameraStream = null;
+                uploadDocument.cameraActive = false;
+
+                if (agendaCameraVideo.value) {
+                    agendaCameraVideo.value.srcObject = null;
+                }
+            }
+
+            function captureAgendaPhoto() {
+                const video = agendaCameraVideo.value;
+                const canvas = agendaCameraCanvas.value;
+
+                if (!video || !canvas || !video.videoWidth || !video.videoHeight) {
+                    swalError('Kamera belum siap.');
+                    return;
+                }
+
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                canvas.toBlob((blob) => {
+                    if (!blob) {
+                        swalError('Foto gagal diambil.');
+                        return;
+                    }
+
+                    if (uploadDocument.imagePreview) {
+                        URL.revokeObjectURL(uploadDocument.imagePreview);
+                    }
+
+                    const fileName = 'foto-agenda-' + moment().format('YYYYMMDD-HHmmss') + '.jpg';
+                    uploadDocument.file = new File([blob], fileName, { type: 'image/jpeg' });
+                    uploadDocument.fileName = fileName;
+                    uploadDocument.imagePreview = URL.createObjectURL(uploadDocument.file);
+                    stopAgendaCamera();
+                }, 'image/jpeg', 0.92);
+            }
+
+            function processAgendaDocument() {
                 if (!uploadDocument.file) {
-                    swalError('Pilih dokumen PDF terlebih dahulu.');
+                    swalError('Pilih berkas atau ambil foto terlebih dahulu.');
                     return;
                 }
 
@@ -156,11 +252,10 @@
                     headers: { 'Content-Type': 'multipart/form-data' }
                 }).then((response) => {
                     if (response.data.status) {
-                        uploadDocument.preview = response.data.parsed || {};
+                        uploadDocument.review = normalizeImportedAgendaReview(response.data.parsed || {});
+                        uploadDocument.warnings = response.data.warnings || [];
+                        uploadDocument.reviewReady = true;
                         swalSuccess(response.data.message);
-                        $('#upload-agenda-document-modal').modal('hide');
-                        uploadDocument.file = null;
-                        showAllAgenda();
                     } else {
                         swalError(response.data.message);
                     }
@@ -177,6 +272,81 @@
                 }).finally(() => {
                     uploadDocument.loading = false;
                 });
+            }
+
+            function saveImportedAgenda() {
+                uploadDocument.loading = true;
+                customAxios.post('/agenda/import-document/store', uploadDocument.review)
+                    .then((response) => {
+                        if (response.data.status) {
+                            swalSuccess(response.data.message);
+                            $('#upload-agenda-document-modal').modal('hide');
+                            resetAgendaDocumentImport();
+                            showAllAgenda();
+                        } else {
+                            swalError(response.data.message);
+                        }
+                    }).catch(error => {
+                        let message = error.response?.data?.message || 'Agenda gagal disimpan.';
+                        const errors = error.response?.data?.errors || {};
+
+                        if (Object.keys(errors).length > 0) {
+                            message = Object.values(errors).flat().join('\n');
+                        }
+
+                        validation.value = error.response?.data?.errors || [message];
+                        swalError(message);
+                    }).finally(() => {
+                        uploadDocument.loading = false;
+                    });
+            }
+
+            function resetAgendaDocumentImport(stopCamera = true) {
+                if (stopCamera) {
+                    stopAgendaCamera();
+                }
+
+                if (uploadDocument.imagePreview) {
+                    URL.revokeObjectURL(uploadDocument.imagePreview);
+                }
+
+                uploadDocument.file = null;
+                uploadDocument.fileName = '';
+                uploadDocument.imagePreview = '';
+                uploadDocument.reviewReady = false;
+                uploadDocument.warnings = [];
+                uploadDocument.review = emptyImportedAgendaReview();
+
+                const input = document.getElementById('agenda-document-file-input');
+                if (input) {
+                    input.value = '';
+                }
+            }
+
+            function emptyImportedAgendaReview() {
+                return {
+                    nama_agenda: '',
+                    tanggal_agenda: moment().format('YYYY-MM-DD'),
+                    jam_mulai: '',
+                    jam_selesai: '',
+                    tempat_agenda: '',
+                    pakaian: '',
+                    sifat_agenda: 'publik',
+                    is_done: 0,
+                    kehadiran: [''],
+                };
+            }
+
+            function normalizeImportedAgendaReview(data) {
+                return {
+                    ...emptyImportedAgendaReview(),
+                    ...data,
+                    jam_mulai: data.jam_mulai || '',
+                    jam_selesai: data.jam_selesai || '',
+                    pakaian: data.pakaian || '',
+                    is_done: Number(data.is_done || 0),
+                    kehadiran: Array.isArray(data.kehadiran) && data.kehadiran.length > 0 ? data.kehadiran : [''],
+                };
             }
 
             async function editAgenda(id) {
@@ -380,6 +550,10 @@
                     filterJabatanIds.value = $(this).val() ? $(this).val().map(Number) : [];
                     searchAgenda(); // panggil filter setiap kali select berubah
                 });
+
+                $('#upload-agenda-document-modal').on('hidden.bs.modal', function () {
+                    resetAgendaDocumentImport();
+                });
             });
 
             function exportPdf() {
@@ -401,6 +575,8 @@
                 searchAgendaValue,
                 postAgenda,
                 editAgendaData,
+                agendaCameraVideo,
+                agendaCameraCanvas,
                 listJabatan,
                 showAllAgenda,
                 searchAgenda,
@@ -410,7 +586,13 @@
                 deleteAgenda,
                 uploadDocument,
                 selectAgendaDocument,
-                uploadAgendaDocument,
+                openAgendaFilePicker,
+                startAgendaCamera,
+                stopAgendaCamera,
+                captureAgendaPhoto,
+                processAgendaDocument,
+                saveImportedAgenda,
+                resetAgendaDocumentImport,
                 getAllJabatan,
                 moment,
                 filterTanggal,
